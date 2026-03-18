@@ -50,7 +50,20 @@ plugins {
 git clone https://github.com/sharph/zellij-worktree
 cd zellij-worktree
 cargo build --release
-cp target/wasm32-wasip1/release/zellij_worktree.wasm ~/.config/zellij/plugins/
+mkdir -p ~/.config/zellij/plugins
+cp target/wasm32-wasip1/release/zellij-worktree.wasm ~/.config/zellij/plugins/
+```
+
+Then update your config to use the local plugin:
+
+```kdl
+shared_except "locked" "tab" {
+    bind "Ctrl w" {
+        LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zellij-worktree.wasm" {
+            floating true
+        }
+    }
+}
 ```
 
 ## Usage
