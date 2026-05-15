@@ -182,17 +182,17 @@ impl ZellijPlugin for State {
                         self.clear_state();
                     }
                     BareKey::Esc => {
-                        close_focus();
+                        close_self();
                     }
                     BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                        close_focus();
+                        close_self();
                     }
                     BareKey::Enter => match self.mode {
                         Mode::List => {
                             if let Some(worktree) = self.worktrees.get(self.selected_index) {
                                 let tab_name = self.get_tab_name(&worktree.path);
                                 new_tab(Some(&tab_name), Some(&worktree.path));
-                                close_focus();
+                                close_self();
                             }
                         }
                         Mode::Create => {
@@ -319,7 +319,7 @@ impl ZellijPlugin for State {
                                     (context.get("tab_name"), context.get("path"))
                                 {
                                     new_tab(Some(&tab_name), Some(&path));
-                                    close_focus();
+                                    close_self();
                                 }
                             }
                             Some(code) => {
