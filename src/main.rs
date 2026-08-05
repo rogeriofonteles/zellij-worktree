@@ -25,7 +25,6 @@ struct State {
     worktrees: Vec<WorktreeInfo>,
     selected_index: usize,
     error_message: Option<String>,
-    cwd_diagnostic: Option<String>,
     waiting_for_command: bool,
     repo_root: Option<String>,
     working_directory: Option<PathBuf>,
@@ -45,7 +44,6 @@ impl Default for State {
             worktrees: Vec::new(),
             selected_index: 0,
             error_message: None,
-            cwd_diagnostic: None,
             waiting_for_command: false,
             repo_root: None,
             working_directory: None,
@@ -141,7 +139,6 @@ impl State {
         // Use fully qualified syntax to avoid yansi's deprecated Paint::clear()
         String::clear(&mut self.input);
         self.error_message = None;
-        self.cwd_diagnostic = None;
         self.waiting_for_command = false;
         self.selected_index = 0;
     }
@@ -195,14 +192,6 @@ impl State {
         let mut context = BTreeMap::new();
         context.insert("command".to_string(), "rev-parse".to_string());
         let pane_pid = get_pane_pid(pane_id).ok().filter(|pid| *pid > 0);
-        self.cwd_diagnostic = Some(format!(
-            "pane={} pid={} zellij_cwd={}",
-            focused_pane.id,
-            pane_pid
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            pane_cwd.display()
-        ));
         if let Some(pane_pid) = pane_pid {
             context.insert("cwd_source".to_string(), "process-tree".to_string());
             Self::launch_repository_discovery(pane_pid, &pane_cwd, context);
@@ -426,20 +415,10 @@ impl ZellijPlugin for State {
                         } else if context.get("cwd_source").map(String::as_str)
                             == Some("process-tree")
                         {
-                            let proc_error = String::from_utf8_lossy(&stderr);
-                            if let Some(diagnostic) = &mut self.cwd_diagnostic {
-                                diagnostic.push_str(&format!(
-                                    " | process_tree_error={} ({:?})",
-                                    proc_error.trim(),
-                                    exit_code
-                                ));
-                            }
                             if let Some(cwd) = self.working_directory.as_deref() {
                                 let mut fallback_context = BTreeMap::new();
                                 fallback_context
                                     .insert("command".to_string(), "rev-parse".to_string());
-                                fallback_context
-                                    .insert("cwd_source".to_string(), "zellij".to_string());
                                 Self::launch_git_command(
                                     &["rev-parse", "--show-toplevel"],
                                     cwd,
@@ -562,9 +541,6 @@ impl ZellijPlugin for State {
         }
 
         println!("{}", BUILD_LABEL.bright_black());
-        if let Some(diagnostic) = &self.cwd_diagnostic {
-            println!("{}", diagnostic.bright_black());
-        }
 
         if !self.initialized {
             if let Some(error) = &self.error_message {
