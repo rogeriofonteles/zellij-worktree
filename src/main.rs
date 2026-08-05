@@ -28,6 +28,7 @@ struct State {
     working_directory: Option<PathBuf>,
     base_path: Option<String>,
     initialized: bool,
+    first_render: bool,
     refresh_pending: bool,
     active_tab_position: Option<usize>,
     pane_manifest: Option<PaneManifest>,
@@ -46,6 +47,7 @@ impl Default for State {
             working_directory: None,
             base_path: None,
             initialized: false,
+            first_render: true,
             refresh_pending: false,
             active_tab_position: None,
             pane_manifest: None,
@@ -494,6 +496,11 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, _rows: usize, _cols: usize) {
+        if self.first_render {
+            self.first_render = false;
+            self.request_git_refresh();
+        }
+
         if !self.initialized {
             if let Some(error) = &self.error_message {
                 println!("{}", error.red());
