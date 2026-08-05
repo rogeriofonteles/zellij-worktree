@@ -173,7 +173,8 @@ impl State {
             return;
         };
 
-        let pane_cwd = match get_pane_cwd(PaneId::Terminal(focused_pane.id)) {
+        let pane_id = PaneId::Terminal(focused_pane.id);
+        let pane_cwd = match get_pane_cwd(pane_id) {
             Ok(cwd) => cwd,
             Err(error) => {
                 self.fail_refresh(format!(
@@ -188,7 +189,15 @@ impl State {
 
         let mut context = BTreeMap::new();
         context.insert("command".to_string(), "rev-parse".to_string());
-        Self::launch_git_command(&["rev-parse", "--show-toplevel"], &pane_cwd, context);
+        let command_cwd = get_pane_pid(pane_id)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .map(|pid| {
+                context.insert("cwd_source".to_string(), "proc".to_string());
+                PathBuf::from(format!("/proc/{pid}/cwd"))
+            })
+            .unwrap_or(pane_cwd);
+        Self::launch_git_command(&["rev-parse", "--show-toplevel"], &command_cwd, context);
     }
 
     fn fail_refresh(&mut self, message: impl Into<String>) {
@@ -387,6 +396,21 @@ impl ZellijPlugin for State {
                                 self.waiting_for_command = false;
                                 self.error_message =
                                     Some("Could not determine git root".to_string());
+                            }
+                        } else if context.get("cwd_source").map(String::as_str) == Some("proc") {
+                            if let Some(cwd) = self.working_directory.as_deref() {
+                                let mut fallback_context = BTreeMap::new();
+                                fallback_context
+                                    .insert("command".to_string(), "rev-parse".to_string());
+                                fallback_context
+                                    .insert("cwd_source".to_string(), "zellij".to_string());
+                                Self::launch_git_command(
+                                    &["rev-parse", "--show-toplevel"],
+                                    cwd,
+                                    fallback_context,
+                                );
+                            } else {
+                                self.fail_refresh("Could not determine focused pane directory");
                             }
                         } else if exit_code.is_none() {
                             self.fail_refresh("Failed to launch Git");
