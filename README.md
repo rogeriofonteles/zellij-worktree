@@ -105,7 +105,7 @@ shared_except "locked" "tab" {
 
 ## Requirements
 
-- Zellij 0.42.0 or later
+- Zellij 0.44.3 or later
 - Git
 
 ## License

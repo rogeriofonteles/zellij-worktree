@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use yansi::Paint;
 use zellij_tile::prelude::*;
 
@@ -24,9 +25,12 @@ struct State {
     error_message: Option<String>,
     waiting_for_command: bool,
     repo_root: Option<String>,
+    working_directory: Option<PathBuf>,
     base_path: Option<String>,
     initialized: bool,
-    first_render: bool,
+    refresh_pending: bool,
+    active_tab_position: Option<usize>,
+    pane_manifest: Option<PaneManifest>,
 }
 
 impl Default for State {
@@ -39,9 +43,12 @@ impl Default for State {
             error_message: None,
             waiting_for_command: false,
             repo_root: None,
+            working_directory: None,
             base_path: None,
             initialized: false,
-            first_render: true,
+            refresh_pending: false,
+            active_tab_position: None,
+            pane_manifest: None,
         }
     }
 }
@@ -96,7 +103,7 @@ impl State {
         // Relative paths starting with ./ or ../
         if input.starts_with("./") || input.starts_with("../") {
             if let Some(repo_root) = &self.repo_root {
-                let repo_path = std::path::Path::new(repo_root);
+                let repo_path = Path::new(repo_root);
                 return Some(repo_path.join(input).to_string_lossy().to_string());
             }
             return None;
@@ -106,7 +113,7 @@ impl State {
         if let Some(base_path) = &self.base_path {
             Some(format!("{}/{}", base_path, input))
         } else if let Some(repo_root) = &self.repo_root {
-            let parent = std::path::Path::new(repo_root)
+            let parent = Path::new(repo_root)
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string());
@@ -117,7 +124,7 @@ impl State {
     }
 
     fn get_tab_name(&self, path: &str) -> String {
-        std::path::Path::new(path)
+        Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("worktree")
@@ -132,20 +139,85 @@ impl State {
         self.selected_index = 0;
     }
 
-    fn refresh_git_info(&mut self) {
+    fn request_git_refresh(&mut self) {
         self.initialized = false;
         self.repo_root = None;
+        self.working_directory = None;
         // Use fully qualified syntax to avoid yansi's deprecated Paint::clear()
         Vec::clear(&mut self.worktrees);
         self.error_message = None;
         self.waiting_for_command = true;
+        self.refresh_pending = true;
         self.mode = Mode::List;
         // Use fully qualified syntax to avoid yansi's deprecated Paint::clear()
         String::clear(&mut self.input);
 
+        self.try_start_git_refresh();
+    }
+
+    fn try_start_git_refresh(&mut self) {
+        if !self.refresh_pending {
+            return;
+        }
+
+        let Some(tab_position) = self.active_tab_position else {
+            return;
+        };
+        let Some(pane_manifest) = &self.pane_manifest else {
+            return;
+        };
+        let Some(focused_pane) = get_focused_pane(tab_position, pane_manifest) else {
+            self.fail_refresh("No focused terminal pane found");
+            return;
+        };
+
+        let pane_cwd = match get_pane_cwd(PaneId::Terminal(focused_pane.id)) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                self.fail_refresh(format!(
+                    "Could not determine focused pane working directory: {error}"
+                ));
+                return;
+            }
+        };
+
+        self.working_directory = Some(pane_cwd.clone());
+        self.refresh_pending = false;
+
         let mut context = BTreeMap::new();
         context.insert("command".to_string(), "rev-parse".to_string());
-        run_command(&["git", "rev-parse", "--show-toplevel"], context);
+        Self::launch_git_command(&["rev-parse", "--show-toplevel"], &pane_cwd, context);
+    }
+
+    fn fail_refresh(&mut self, message: impl Into<String>) {
+        self.refresh_pending = false;
+        self.waiting_for_command = false;
+        self.error_message = Some(message.into());
+    }
+
+    fn launch_git_command(args: &[&str], cwd: &Path, context: BTreeMap<String, String>) {
+        let mut command = Vec::with_capacity(args.len() + 1);
+        command.push("git");
+        command.extend_from_slice(args);
+        run_command_with_env_variables_and_cwd(
+            &command,
+            BTreeMap::new(),
+            cwd.to_path_buf(),
+            context,
+        );
+    }
+
+    fn run_git_command(
+        &self,
+        args: &[&str],
+        context: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let repo_root = self
+            .repo_root
+            .as_deref()
+            .ok_or_else(|| "Could not determine Git repository directory".to_string())?;
+        Self::launch_git_command(args, Path::new(repo_root), context);
+        Ok(())
     }
 }
 
@@ -161,6 +233,7 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::RunCommandResult,
             EventType::TabUpdate,
+            EventType::PaneUpdate,
             EventType::Visible,
         ]);
 
@@ -207,7 +280,12 @@ impl ZellijPlugin for State {
                                         .insert("command".to_string(), "worktree-add".to_string());
                                     context.insert("tab_name".to_string(), tab_name);
                                     context.insert("path".to_string(), path.clone());
-                                    run_command(&["git", "worktree", "add", &path], context);
+                                    if let Err(error) =
+                                        self.run_git_command(&["worktree", "add", &path], context)
+                                    {
+                                        self.waiting_for_command = false;
+                                        self.error_message = Some(error);
+                                    }
                                 } else {
                                     self.error_message = Some(
                                         [
@@ -227,10 +305,13 @@ impl ZellijPlugin for State {
                                 let mut context = BTreeMap::new();
                                 context
                                     .insert("command".to_string(), "worktree-remove".to_string());
-                                run_command(
-                                    &["git", "worktree", "remove", &worktree.path],
+                                if let Err(error) = self.run_git_command(
+                                    &["worktree", "remove", &worktree.path],
                                     context,
-                                );
+                                ) {
+                                    self.waiting_for_command = false;
+                                    self.error_message = Some(error);
+                                }
                             }
                         }
                     },
@@ -294,21 +375,46 @@ impl ZellijPlugin for State {
                                 self.repo_root = Some(path);
                                 let mut context = BTreeMap::new();
                                 context.insert("command".to_string(), "worktree-list".to_string());
-                                run_command(&["git", "worktree", "list", "--porcelain"], context);
+                                if let Err(error) = self
+                                    .run_git_command(&["worktree", "list", "--porcelain"], context)
+                                {
+                                    self.waiting_for_command = false;
+                                    self.error_message = Some(error);
+                                }
                             } else {
                                 self.waiting_for_command = false;
                                 self.error_message =
                                     Some("Could not determine git root".to_string());
                             }
+                        } else if exit_code.is_none() {
+                            self.fail_refresh("Failed to launch Git");
                         } else {
-                            self.waiting_for_command = false;
-                            self.error_message = Some("Not in a git repository".to_string());
+                            let cwd = self
+                                .working_directory
+                                .as_deref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "the focused pane directory".to_string());
+                            self.fail_refresh(format!(
+                                "Focused pane directory is not inside a Git repository: {cwd}"
+                            ));
                         }
                     }
                     "worktree-list" => {
-                        self.parse_worktree_list(&stdout);
-                        self.initialized = true;
                         self.waiting_for_command = false;
+                        match exit_code {
+                            Some(0) => {
+                                self.parse_worktree_list(&stdout);
+                                self.initialized = true;
+                            }
+                            Some(code) => {
+                                let error = String::from_utf8_lossy(&stderr);
+                                self.error_message =
+                                    Some(format!("Error ({}): {}", code, error.trim()));
+                            }
+                            None => {
+                                self.error_message = Some("Failed to launch Git".to_string());
+                            }
+                        }
                     }
                     "worktree-add" => {
                         self.waiting_for_command = false;
@@ -328,7 +434,7 @@ impl ZellijPlugin for State {
                                     Some(format!("Error ({}): {}", code, error.trim()));
                             }
                             None => {
-                                self.error_message = Some("Command failed".to_string());
+                                self.error_message = Some("Failed to launch Git".to_string());
                             }
                         }
                     }
@@ -341,8 +447,12 @@ impl ZellijPlugin for State {
                                 self.clear_state();
                                 let mut ctx = BTreeMap::new();
                                 ctx.insert("command".to_string(), "worktree-list".to_string());
-                                run_command(&["git", "worktree", "list", "--porcelain"], ctx);
-                                self.waiting_for_command = true;
+                                match self
+                                    .run_git_command(&["worktree", "list", "--porcelain"], ctx)
+                                {
+                                    Ok(()) => self.waiting_for_command = true,
+                                    Err(error) => self.error_message = Some(error),
+                                }
                             }
                             Some(code) => {
                                 let error = String::from_utf8_lossy(&stderr);
@@ -350,7 +460,7 @@ impl ZellijPlugin for State {
                                     Some(format!("Error ({}): {}", code, error.trim()));
                             }
                             None => {
-                                self.error_message = Some("Command failed".to_string());
+                                self.error_message = Some("Failed to launch Git".to_string());
                             }
                         }
                     }
@@ -362,17 +472,20 @@ impl ZellijPlugin for State {
                 true
             }
             Event::TabUpdate(tabs) => {
-                // Try to detect current worktree from focused tab
-                if let Some(_focused_tab) = tabs.iter().find(|t| t.active) {
-                    // We could use the tab's cwd if available
-                    // For now, we rely on git rev-parse
-                }
+                self.active_tab_position =
+                    tabs.iter().find(|tab| tab.active).map(|tab| tab.position);
+                self.try_start_git_refresh();
+                false
+            }
+            Event::PaneUpdate(pane_manifest) => {
+                self.pane_manifest = Some(pane_manifest);
+                self.try_start_git_refresh();
                 false
             }
             Event::Visible(is_visible) => {
                 if is_visible && !self.waiting_for_command {
                     // Refresh git info when plugin becomes visible
-                    self.refresh_git_info();
+                    self.request_git_refresh();
                 }
                 true
             }
@@ -381,11 +494,6 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, _rows: usize, _cols: usize) {
-        if self.first_render {
-            self.first_render = false;
-            self.refresh_git_info();
-        }
-
         if !self.initialized {
             if let Some(error) = &self.error_message {
                 println!("{}", error.red());
@@ -470,5 +578,44 @@ impl ZellijPlugin for State {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_worktrees_and_marks_the_detected_repository() {
+        let mut state = State {
+            repo_root: Some("/projects/topic".to_string()),
+            ..State::default()
+        };
+
+        state.parse_worktree_list(
+            b"worktree /projects/main\nHEAD abc\nbranch refs/heads/main\n\
+              \nworktree /projects/topic\nHEAD def\nbranch refs/heads/topic\n",
+        );
+
+        assert_eq!(state.worktrees.len(), 1);
+        assert_eq!(state.worktrees[0].path, "/projects/topic");
+        assert_eq!(
+            state.worktrees[0].branch.as_deref(),
+            Some("refs/heads/topic")
+        );
+        assert!(state.worktrees[0].is_current);
+    }
+
+    #[test]
+    fn resolves_relative_worktree_paths_from_the_repository_root() {
+        let state = State {
+            repo_root: Some("/projects/main".to_string()),
+            ..State::default()
+        };
+
+        assert_eq!(
+            state.resolve_worktree_path("../topic").as_deref(),
+            Some("/projects/main/../topic")
+        );
     }
 }
