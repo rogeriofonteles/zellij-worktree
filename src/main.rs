@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use yansi::Paint;
 use zellij_tile::prelude::*;
 
+const BUILD_LABEL: &str = "zellij-worktree 0.1.0 (live-cwd fix)";
+
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
     List,
@@ -524,6 +526,8 @@ impl ZellijPlugin for State {
             self.first_render = false;
             self.request_git_refresh();
         }
+
+        println!("{}", BUILD_LABEL.bright_black());
 
         if !self.initialized {
             if let Some(error) = &self.error_message {
