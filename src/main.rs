@@ -29,6 +29,8 @@ struct State {
     repo_root: Option<String>,
     working_directory: Option<PathBuf>,
     base_path: Option<String>,
+    remote_host: Option<String>,
+    remote_repo: Option<String>,
     initialized: bool,
     first_render: bool,
     refresh_pending: bool,
@@ -48,6 +50,8 @@ impl Default for State {
             repo_root: None,
             working_directory: None,
             base_path: None,
+            remote_host: None,
+            remote_repo: None,
             initialized: false,
             first_render: true,
             refresh_pending: false,
@@ -135,6 +139,29 @@ impl State {
             .to_string()
     }
 
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn open_worktree_tab(&self, tab_name: &str, path: &str) {
+        if let Some(remote_host) = &self.remote_host {
+            let remote_command = format!(
+                "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                Self::shell_quote(path)
+            );
+            let command = CommandToRun::new_with_args(
+                "ssh",
+                vec!["-t".to_string(), remote_host.clone(), remote_command],
+            );
+            let (tab_id, _) = open_command_pane_in_new_tab(command, BTreeMap::new());
+            if let Some(tab_id) = tab_id {
+                rename_tab_with_id(tab_id as u64, tab_name);
+            }
+        } else {
+            new_tab(Some(tab_name), Some(path));
+        }
+    }
+
     fn clear_state(&mut self) {
         // Use fully qualified syntax to avoid yansi's deprecated Paint::clear()
         String::clear(&mut self.input);
@@ -161,6 +188,24 @@ impl State {
 
     fn try_start_git_refresh(&mut self) {
         if !self.refresh_pending {
+            return;
+        }
+
+        if let Some(remote_host) = self.remote_host.clone() {
+            let Some(remote_repo) = self.remote_repo.clone() else {
+                self.fail_refresh("SSH mode requires remote_repo");
+                return;
+            };
+            self.working_directory = Some(PathBuf::from(&remote_repo));
+            self.refresh_pending = false;
+            let mut context = BTreeMap::new();
+            context.insert("command".to_string(), "rev-parse".to_string());
+            Self::launch_remote_git_command(
+                &remote_host,
+                &["rev-parse", "--show-toplevel"],
+                &remote_repo,
+                context,
+            );
             return;
         }
 
@@ -218,6 +263,20 @@ impl State {
         );
     }
 
+    fn launch_remote_git_command(
+        remote_host: &str,
+        args: &[&str],
+        cwd: &str,
+        context: BTreeMap<String, String>,
+    ) {
+        let mut remote_command = format!("git -C {}", Self::shell_quote(cwd));
+        for arg in args {
+            remote_command.push(' ');
+            remote_command.push_str(&Self::shell_quote(arg));
+        }
+        run_command(&["ssh", remote_host, remote_command.as_str()], context);
+    }
+
     fn launch_repository_discovery(
         pane_pid: i32,
         fallback_cwd: &Path,
@@ -242,7 +301,11 @@ impl State {
             .repo_root
             .as_deref()
             .ok_or_else(|| "Could not determine Git repository directory".to_string())?;
-        Self::launch_git_command(args, Path::new(repo_root), context);
+        if let Some(remote_host) = &self.remote_host {
+            Self::launch_remote_git_command(remote_host, args, repo_root, context);
+        } else {
+            Self::launch_git_command(args, Path::new(repo_root), context);
+        }
         Ok(())
     }
 }
@@ -265,6 +328,12 @@ impl ZellijPlugin for State {
 
         if let Some(base_path) = configuration.get("base_path") {
             self.base_path = Some(base_path.clone());
+        }
+        self.remote_host = configuration.get("remote_host").cloned();
+        self.remote_repo = configuration.get("remote_repo").cloned();
+
+        if self.remote_host.is_some() && self.remote_repo.is_none() {
+            self.error_message = Some("remote_host requires remote_repo".to_string());
         }
     }
 
@@ -290,7 +359,7 @@ impl ZellijPlugin for State {
                         Mode::List => {
                             if let Some(worktree) = self.worktrees.get(self.selected_index) {
                                 let tab_name = self.get_tab_name(&worktree.path);
-                                new_tab(Some(&tab_name), Some(&worktree.path));
+                                self.open_worktree_tab(&tab_name, &worktree.path);
                                 close_self();
                             }
                         }
@@ -465,7 +534,7 @@ impl ZellijPlugin for State {
                                 if let (Some(tab_name), Some(path)) =
                                     (context.get("tab_name"), context.get("path"))
                                 {
-                                    new_tab(Some(&tab_name), Some(&path));
+                                    self.open_worktree_tab(tab_name, path);
                                     close_self();
                                 }
                             }
@@ -664,6 +733,28 @@ mod tests {
         assert_eq!(
             state.resolve_worktree_path("../topic").as_deref(),
             Some("/projects/main/../topic")
+        );
+    }
+
+    #[test]
+    fn quotes_remote_shell_arguments() {
+        assert_eq!(State::shell_quote("plain path"), "'plain path'");
+        assert_eq!(State::shell_quote("it's here"), "'it'\\''s here'");
+    }
+
+    #[test]
+    fn remote_base_path_is_used_for_new_worktrees() {
+        let state = State {
+            repo_root: Some("/srv/projects/main".to_string()),
+            base_path: Some("/srv/worktrees".to_string()),
+            remote_host: Some("dev-vm".to_string()),
+            remote_repo: Some("/srv/projects/main".to_string()),
+            ..State::default()
+        };
+
+        assert_eq!(
+            state.resolve_worktree_path("topic").as_deref(),
+            Some("/srv/worktrees/topic")
         );
     }
 }

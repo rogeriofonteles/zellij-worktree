@@ -11,6 +11,7 @@ A Zellij plugin for managing git worktrees.
 - **Create worktrees**: Create new worktrees and open them in new tabs
 - **Delete worktrees**: Delete worktrees with confirmation
 - **Smart path resolution**: Branch names create worktrees in parent directory; full paths are used as-is
+- **SSH mode**: Manage worktrees on another machine while keeping Zellij local
 
 ## Configuration and Installation
 
@@ -43,6 +44,77 @@ plugins {
     }
 }
 ```
+
+### SSH mode (local Zellij, remote worktrees)
+
+SSH mode is for sessions where Zellij runs locally but a terminal pane is connected to another
+machine. The plugin runs Git over SSH and opens each selected worktree in a new local Zellij tab
+that contains its own SSH connection. Zellij does not need to be installed or running on the
+remote machine.
+
+Configure both `remote_host` and `remote_repo` on the plugin launch action:
+
+```kdl
+shared_except "locked" "tab" {
+    bind "Ctrl w" {
+        LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zellij-worktree.wasm" {
+            floating true
+            remote_host "dev-vm"
+            remote_repo "/home/rogerio/projects/my-project"
+        }
+    }
+}
+```
+
+- `remote_host` is passed directly to `ssh`. It can be a hostname, `user@host`, or an alias from
+  `~/.ssh/config`.
+- `remote_repo` is an absolute path on the remote machine to any worktree in the repository.
+- `base_path`, when set, is also interpreted on the remote machine in SSH mode.
+
+With the configuration above, the plugin obtains the list with the equivalent of:
+
+```bash
+ssh dev-vm "git -C /home/rogerio/projects/my-project worktree list --porcelain"
+```
+
+Choosing a worktree such as `/home/rogerio/projects/my-project-feature` creates a new local
+Zellij tab running the equivalent of:
+
+```bash
+ssh -t dev-vm 'cd -- /home/rogerio/projects/my-project-feature && exec "$SHELL" -l'
+```
+
+Create and delete operations also execute remotely. Relative create paths are resolved from the
+remote repository root, and branch names use the remote repository's parent directory unless
+`base_path` is configured.
+
+#### SSH requirements and recommendations
+
+The plugin's discovery, create, and delete commands run in the background and cannot display an
+interactive password prompt. Configure public-key authentication (and unlock the key in an SSH
+agent) before using SSH mode. Verify it with:
+
+```bash
+ssh dev-vm true
+```
+
+SSH connection multiplexing avoids establishing a new connection for every operation:
+
+```sshconfig
+Host dev-vm
+    HostName dev-vm.example.com
+    User rogerio
+    ControlMaster auto
+    ControlPersist 10m
+    ControlPath ~/.ssh/control-%C
+```
+
+The remote login environment must provide `git` and a POSIX-compatible shell. Because an SSH
+client does not expose the current directory of its interactive remote shell to local Zellij,
+`remote_repo` is required; the plugin does not infer it from the focused SSH pane.
+
+To keep both local and remote shortcuts, define two bindings with different plugin configuration
+(for example, `Ctrl w` for local worktrees and `Ctrl Shift w` for the remote host).
 
 ### Build from source
 
@@ -107,6 +179,7 @@ shared_except "locked" "tab" {
 
 - Zellij 0.44.3 or later
 - Git
+- SSH client, key-based authentication, and Git on the remote host when using SSH mode
 
 ## License
 
