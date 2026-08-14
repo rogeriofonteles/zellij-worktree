@@ -31,6 +31,7 @@ struct State {
     base_path: Option<String>,
     remote_host: Option<String>,
     remote_repo: Option<String>,
+    workbench_command: Option<String>,
     initialized: bool,
     first_render: bool,
     refresh_pending: bool,
@@ -52,6 +53,7 @@ impl Default for State {
             base_path: None,
             remote_host: None,
             remote_repo: None,
+            workbench_command: None,
             initialized: false,
             first_render: true,
             refresh_pending: false,
@@ -308,6 +310,22 @@ impl State {
         }
         Ok(())
     }
+
+    fn launch_workbench(&self, path: &str) -> Result<(), String> {
+        let command = self.workbench_command.as_deref().ok_or_else(|| {
+            "The worktree plugin is missing its workbench_command configuration".to_string()
+        })?;
+
+        let mut context = BTreeMap::new();
+        context.insert("command".to_string(), "workbench-open".to_string());
+        run_command_with_env_variables_and_cwd(
+            &[command, path],
+            BTreeMap::new(),
+            PathBuf::from(path),
+            context,
+        );
+        Ok(())
+    }
 }
 
 impl ZellijPlugin for State {
@@ -335,6 +353,9 @@ impl ZellijPlugin for State {
         if self.remote_host.is_some() && self.remote_repo.is_none() {
             self.error_message = Some("remote_host requires remote_repo".to_string());
         }
+        if let Some(workbench_command) = configuration.get("workbench_command") {
+            self.workbench_command = Some(workbench_command.clone());
+        }
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -358,22 +379,29 @@ impl ZellijPlugin for State {
                     BareKey::Enter => match self.mode {
                         Mode::List => {
                             if let Some(worktree) = self.worktrees.get(self.selected_index) {
-                                let tab_name = self.get_tab_name(&worktree.path);
-                                self.open_worktree_tab(&tab_name, &worktree.path);
-                                close_self();
+                                if self.remote_host.is_some() {
+                                    let tab_name = self.get_tab_name(&worktree.path);
+                                    self.open_worktree_tab(&tab_name, &worktree.path);
+                                    close_self();
+                                } else {
+                                    self.waiting_for_command = true;
+                                    self.error_message = None;
+                                    if let Err(error) = self.launch_workbench(&worktree.path) {
+                                        self.waiting_for_command = false;
+                                        self.error_message = Some(error);
+                                    }
+                                }
                             }
                         }
                         Mode::Create => {
                             if !self.input.is_empty() {
                                 if let Some(path) = self.resolve_worktree_path(&self.input) {
-                                    let tab_name = self.get_tab_name(&path);
                                     self.waiting_for_command = true;
                                     self.error_message = None;
 
                                     let mut context = BTreeMap::new();
                                     context
                                         .insert("command".to_string(), "worktree-add".to_string());
-                                    context.insert("tab_name".to_string(), tab_name);
                                     context.insert("path".to_string(), path.clone());
                                     if let Err(error) =
                                         self.run_git_command(&["worktree", "add", &path], context)
@@ -531,11 +559,18 @@ impl ZellijPlugin for State {
 
                         match exit_code {
                             Some(0) => {
-                                if let (Some(tab_name), Some(path)) =
-                                    (context.get("tab_name"), context.get("path"))
-                                {
-                                    self.open_worktree_tab(tab_name, path);
-                                    close_self();
+                                if let Some(path) = context.get("path") {
+                                    if self.remote_host.is_some() {
+                                        let tab_name = self.get_tab_name(path);
+                                        self.open_worktree_tab(&tab_name, path);
+                                        close_self();
+                                    } else {
+                                        if let Err(error) = self.launch_workbench(path) {
+                                            self.error_message = Some(error);
+                                        } else {
+                                            self.waiting_for_command = true;
+                                        }
+                                    }
                                 }
                             }
                             Some(code) => {
@@ -545,6 +580,24 @@ impl ZellijPlugin for State {
                             }
                             None => {
                                 self.error_message = Some("Failed to launch Git".to_string());
+                            }
+                        }
+                    }
+                    "workbench-open" => {
+                        self.waiting_for_command = false;
+                        match exit_code {
+                            Some(0) => close_self(),
+                            Some(code) => {
+                                let error = String::from_utf8_lossy(&stderr);
+                                self.error_message = Some(format!(
+                                    "Could not open workbench ({}): {}",
+                                    code,
+                                    error.trim()
+                                ));
+                            }
+                            None => {
+                                self.error_message =
+                                    Some("Failed to launch the workbench command".to_string());
                             }
                         }
                     }

@@ -133,6 +133,7 @@ shared_except "locked" "tab" {
     bind "Ctrl w" {
         LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zellij-worktree.wasm" {
             floating true
+            workbench_command "/absolute/path/to/nvim-zellij-workbench/bin/surface-workbench"
         }
     }
 }
@@ -144,7 +145,7 @@ shared_except "locked" "tab" {
 
 1. Press your keybinding (e.g., `Ctrl+w`)
 2. Use `j`/`k` or arrow keys to navigate the list
-3. Press `Enter` to open the selected worktree in a new tab
+3. Press `Enter` to open the selected worktree with `nvim-zellij-workbench`
 
 ### Create Worktree
 
