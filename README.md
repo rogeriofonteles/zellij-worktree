@@ -139,6 +139,18 @@ shared_except "locked" "tab" {
 }
 ```
 
+For the local `Ctrl+k` workbench setup, the repository also includes an idempotent helper. It
+builds and installs the plugin, then updates the current login's Zellij config while preserving
+the rest of the file:
+
+```bash
+./scripts/setup-workbench.sh
+```
+
+By default it uses `../nvim-zellij-workbench/bin/surface-workbench`. Pass a different executable
+path as the first argument when the workbench checkout lives elsewhere. Re-running the script is
+safe, including from a new SSH login with a different home directory.
+
 ## Usage
 
 ### Open Worktree
